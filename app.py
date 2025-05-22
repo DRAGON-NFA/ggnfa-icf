@@ -21,7 +21,7 @@ SHOPIFY_API_VERSION = '2024-04' # 使用最新的稳定 API 版本
 
 # 确保所有必要的环境变量都已加载
 if not all([SHOPIFY_API_KEY, SHOPIFY_API_SECRET, SHOPIFY_ADMIN_API_ACCESS_TOKEN, SHOPIFY_STORE_DOMAIN, SHOPIFY_LOCATION_ID, BLIND_BOX_SKU])
-    print(错误：缺少必要的环境变量。请检查您的 .env 文件或 Render 配置。)
+    print("错误: 缺少必要的环境变量。请检查您的 .env 文件或 Render 配置。")
     # 暂时改为 pass，确保应用能启动，但会在第一次请求时报错
     pass
 
