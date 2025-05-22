@@ -1,8 +1,6 @@
 import os
 import json
 import random
-# import hmac # 这些验证相关的库不再直接需要，除非您要添加自定义验证
-# import hashlib
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
@@ -24,18 +22,12 @@ SHOPIFY_API_VERSION = '2024-04' # 使用最新的稳定 API 版本
 # 确保所有必要的环境变量都已加载
 if not all([SHOPIFY_API_KEY, SHOPIFY_API_SECRET, SHOPIFY_ADMIN_API_ACCESS_TOKEN, SHOPIFY_STORE_DOMAIN, SHOPIFY_LOCATION_ID, BLIND_BOX_SKU]):
     print("错误：缺少必要的环境变量。请检查您的 .env 文件或 Render 配置。")
-    # 这里我们不再使用 exit(1)，因为 Render 可能会在运行时检查。
-    # 最好是抛出异常或在应用启动时有更优雅的错误处理。
-    # 对于 Webhook，直接返回错误响应可能更合适，而不是退出整个应用。
-    # 为了演示，我们暂时保留它，但在生产环境中需要改进。
-    pass # 暂时改为 pass，确保应用能启动，但会在第一次请求时报错
+    # 暂时改为 pass，确保应用能启动，但会在第一次请求时报错
+    pass 
 
 # --- 辅助函数 ---
 # 由于现在请求来自 Make (API Pull模式)，不再直接验证 Shopify HMAC
-# def verify_shopify_webhook(data, hmac_header):
-#     """验证 Shopify Webhook 请求的 HMAC 签名"""
-#     # 此函数在此模式下不再使用，因为 HMAC 验证由 Make 内部处理或不再需要
-#     pass
+# verify_shopify_webhook 函数已移除，因为它不再用于此模式。
 
 
 def shopify_admin_api_request(method, endpoint, json_data=None):
@@ -95,7 +87,6 @@ def get_available_nft_products():
             # 注意：requests.Response().headers.get('link', '') 是不对的，应该是实际的响应对象
             # 应该从实际的 response 对象中获取 headers
             # 这里需要修改 shopify_admin_api_request 函数返回完整的响应对象，或者在此处从 requests.request 返回的对象获取 headers
-            # 假设 shopify_admin_api_request 返回的是响应体，那么分页逻辑需要更谨慎处理
             # 暂时简化分页，避免在这里引入更复杂的问题，如果您有大量产品需要分页，我们再单独处理
             # 假设一个请求就能获取所有，或者只获取第一页进行测试
             endpoint = None # 暂时禁用分页，只获取第一页
@@ -139,21 +130,26 @@ def decrease_nft_inventory(inventory_item_id):
 def home():
     return "NFT Blind Box Allocator App is running!", 200
 
+# !!! 临时调试路由：捕获所有 POST 请求 !!!
+# 将此路由放在 /webhooks/orders/paid 路由之前
+@app.route('/<path:dummy_path>', methods=['POST'])
+def catch_all_post(dummy_path):
+    print(f"DEBUG: 捕获到 POST 请求到未知路径: /{dummy_path}")
+    print(f"DEBUG: 请求头部: {request.headers}")
+    # 尝试解码请求数据，忽略编码错误
+    try:
+        request_data = request.get_data().decode('utf-8')
+    except Exception as e:
+        request_data = f"无法解码请求数据: {e}"
+    print(f"DEBUG: 请求数据: {request_data}")
+    return "Not Found (被调试路由捕获)", 404 # 仍然向 Make 返回 404
+
 @app.route('/webhooks/orders/paid', methods=['POST'])
 def handle_orders_paid_webhook():
     # **重要修改：移除 HMAC 验证逻辑**
     # 由于请求来自 Make (API Pull模式)，Make 已经从 Shopify API 拉取数据，
     # 并且Make发送给此应用的请求不包含X-Shopify-Hmac-Sha256头部。
     # 因此，我们不再需要在这里进行 HMAC 验证。
-
-    # print("注意：在此模式下，我们不再验证 X-Shopify-Hmac-Sha256 头部，因为请求来自 Make 的 API 拉取流程。")
-    # 如果您需要自定义 Make 请求的验证，可以在 Make 的 HTTP 模块中添加自定义头部，并在此处验证。
-    # 例如：
-    # custom_make_token = request.headers.get('X-Make-Validation')
-    # if custom_make_token != 'YOUR_MAKE_SECRET_TOKEN':
-    #     print("自定义 Make 验证失败！")
-    #     return "Unauthorized", 401
-
 
     try:
         # Make 发送的请求体就是 Shopify 订单的 JSON 数据
