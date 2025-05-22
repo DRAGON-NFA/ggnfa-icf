@@ -1,189 +1,220 @@
 import os
-import json
-import random
+import sys
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+import logging
 
-# 加载环境变量（仅用于本地开发和测试）
+# Load environment variables from .env file
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
 
-# --- 配置信息 ---
-SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
-SHOPIFY_API_SECRET = os.getenv('SHOPIFY_API_SECRET')
-SHOPIFY_ADMIN_API_ACCESS_TOKEN = os.getenv('SHOPIFY_ADMIN_API_ACCESS_TOKEN')
-SHOPIFY_STORE_DOMAIN = os.getenv('SHOPIFY_STORE_DOMAIN')
-SHOPIFY_LOCATION_ID = os.getenv('SHOPIFY_LOCATION_ID')
-BLIND_BOX_SKU = os.getenv('BLIND_BOX_SKU', 'BLINDBOX') # 默认值，但建议在环境变量中明确设置
-SHOPIFY_API_VERSION = '2024-04' # 使用最新的稳定 API 版本
+# Verify environment variables
+REQUIRED_ENV_VARS = ["SHOPIFY_API_KEY", "SHOPIFY_API_PASSWORD", "SHOPIFY_SHOP_NAME"]
+if not all(os.environ.get(var) for var in REQUIRED_ENV_VARS):
+    logging.error("ERROR: Missing required environment variables. Please check your .env file or Render configuration.")
+    # Exit with an error code if critical environment variables are missing
+    sys.exit(1)
 
-# 确保所有必要的环境变量都已加载
-if not all([SHOPIFY_API_KEY, SHOPIFY_API_SECRET, SHOPIFY_ADMIN_API_ACCESS_TOKEN, SHOPIFY_STORE_DOMAIN, SHOPIFY_LOCATION_ID, BLIND_BOX_SKU])
-    print 错误 缺少必要的环境变量。请检查您的 .env 文件或 Render 配置.
-    # 暂时改为 pass，确保应用能启动，但会在第一次请求时报错
-    pass
+SHOPIFY_API_KEY = os.environ.get("SHOPIFY_API_KEY")
+SHOPIFY_API_PASSWORD = os.environ.get("SHOPIFY_API_PASSWORD")
+SHOPIFY_SHOP_NAME = os.environ.get("SHOPIFY_SHOP_NAME")
+SHOPIFY_API_VERSION = "2024-04" # You might want to update this to the latest stable version
 
-# !!! 调试语句：打印盲盒 Webhook 路由的 repr() 表示 !!!
-# 这会帮助我们发现潜在的不可见字符
-print(fDEBUG 预期盲盒 Webhook 路由的 repr() {repr('webhooksorderspaid')})
+# Base URL for Shopify Admin API
+SHOPIFY_BASE_URL = f"https://{SHOPIFY_API_KEY}:{SHOPIFY_API_PASSWORD}@{SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/{SHOPIFY_API_VERSION}"
 
+# Helper function to get available NFT products from Shopify
+def get_available_nft_products():
+    """Fetches all available NFT products from Shopify (SKUs starting with 'NFT_SKU_' and in stock)."""
+    products_url = f"{SHOPIFY_BASE_URL}/products.json"
+    headers = {"Content-Type": "application/json"}
+    all_nft_products = []
+    page_info = None
 
-# --- 辅助函数 ---
-def shopify_admin_api_request(method, endpoint, json_data=None)
-    向 Shopify Admin API 发送请求的通用函数
-    url = fhttps{SHOPIFY_STORE_DOMAIN}adminapi{SHOPIFY_API_VERSION}{endpoint}
-    headers = {
-        X-Shopify-Access-Token SHOPIFY_ADMIN_API_ACCESS_TOKEN,
-        Content-Type applicationjson
+    while True:
+        params = {"limit": 250} # Max limit per request
+        if page_info:
+            params['page_info'] = page_info
+
+        try:
+            response = requests.get(products_url, headers=headers, params=params, timeout=10)
+            response.raise_for_status() # Raise an exception for HTTP errors
+            products_data = response.json().get('products', [])
+
+            for product in products_data:
+                for variant in product.get('variants', []):
+                    # Check if SKU starts with 'NFT_SKU_' and is in stock
+                    if variant.get('sku', '').startswith('NFT_SKU_') and variant.get('inventory_quantity', 0) > 0:
+                        all_nft_products.append({
+                            "product_id": product.get("id"),
+                            "product_title": product.get("title"),
+                            "variant_id": variant.get("id"),
+                            "variant_sku": variant.get("sku"),
+                            "inventory_quantity": variant.get("inventory_quantity")
+                        })
+
+            # Check for next page
+            link_header = response.headers.get('link')
+            if link_header:
+                next_page_match = next((l for l in link_header.split(',') if 'rel="next"' in l), None)
+                if next_page_match:
+                    # Extract page_info from the 'next' link
+                    import re
+                    match = re.search(r'page_info=([^&>]+)', next_page_match)
+                    if match:
+                        page_info = match.group(1)
+                    else:
+                        page_info = None # No page_info found, stop pagination
+                else:
+                    page_info = None # No next page link
+            else:
+                page_info = None # No link header
+
+            if not page_info:
+                break # No more pages
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error fetching products from Shopify: {e}")
+            break # Exit loop on error
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during product fetch: {e}")
+            break
+
+    logging.info(f"Found {len(all_nft_products)} available NFT products.")
+    return all_nft_products
+
+# Helper function to update Shopify product inventory
+def update_shopify_inventory(product_id, inventory_item_id, new_quantity, location_id):
+    """Updates the inventory quantity of a Shopify product variant."""
+    inventory_url = f"{SHOPIFY_BASE_URL}/inventory_levels/set.json"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "inventory_item_id": inventory_item_id,
+        "location_id": location_id,
+        "set_quantity": new_quantity
     }
-    try
-        response = requests.request(method, url, headers=headers, json=json_data)
-        response.raise_for_status()  # 如果请求不成功 (4xx 或 5xx)，抛出 HTTPError
-        return response.json()
-    except requests.exceptions.HTTPError as e
-        print(fShopify API 请求失败 {method} {url}, 错误 {e.response.text})
-        raise
-    except requests.exceptions.RequestException as e
-        print(fShopify API 请求网络错误 {method} {url}, 错误 {e})
-        raise
+    try:
+        response = requests.post(inventory_url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        logging.info(f"Successfully updated inventory for item {inventory_item_id} to {new_quantity}.")
+        return True
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error updating inventory for item {inventory_item_id}: {e}")
+        return False
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during inventory update: {e}")
+        return False
 
-def get_available_nft_products()
-    从 Shopify 获取所有可用的 NFT 产品SKU 以 'NFT_SKU_' 开头且有库存
-    available_nfts = []
-    endpoint = products.jsonstatus=active&limit=250&fields=id,title,images,variants
-    while endpoint
-        try
-            data = shopify_admin_api_request(GET, endpoint)
-            products = data.get('products', [])
+# Function to get default location ID (assuming the shop has at least one location)
+def get_default_location_id():
+    """Fetches the default (first) inventory location ID for the Shopify shop."""
+    locations_url = f"{SHOPIFY_BASE_URL}/locations.json"
+    headers = {"Content-Type": "application/json"}
+    try:
+        response = requests.get(locations_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        locations = response.json().get('locations', [])
+        if locations:
+            logging.info(f"Successfully fetched default location ID: {locations[0]['id']}")
+            return locations[0]['id']
+        else:
+            logging.error("No inventory locations found for this shop.")
+            return None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching inventory locations: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during location fetch: {e}")
+        return None
 
-            for product in products
-                if product.get('variants')
-                    for variant in product['variants']
-                        if variant.get('sku', '').startswith('NFT_SKU_') and variant.get('inventory_quantity', 0)  0
-                            image_url = None
-                            if variant.get('image_id')
-                                for img in product.get('images', [])
-                                    if img.get('id') == variant['image_id']
-                                        image_url = img.get('src')
-                                        break
-                            if not image_url and product.get('images')
-                                image_url = product['images'][0].get('src')
 
-                            available_nfts.append({
-                                product_id product['id'],
-                                variant_id variant['id'],
-                                inventory_item_id variant['inventory_item_id'],
-                                sku variant['sku'],
-                                image_url image_url
-                            })
+# Webhook endpoint for Shopify order payment
+@app.route('/webhooks/orders/paid', methods=['POST'])
+def order_paid_webhook():
+    logging.info("Received order paid webhook (from Make API Pull).")
+    data = request.json
 
-            endpoint = None # 暂时禁用分页，只获取第一页
+    if not data:
+        logging.warning("Received empty webhook data.")
+        return jsonify({"message": "No data received"}), 400
 
-        except Exception as e
-            print(f获取可用 NFT 产品时出错 {e})
-            return []
-    return available_nfts
+    order_id = data.get('id')
+    email = data.get('email')
+    logging.info(f"Processing order ID: {order_id}, Customer email: {email}")
 
-def add_nft_to_order_metafield(order_id, nft_sku, nft_image_url, nft_product_id)
-    将分配的 NFT 信息作为元字段添加到订单中
-    metafield_value = json.dumps({
-        sku nft_sku,
-        image nft_image_url,
-        product_id nft_product_id
-    })
-    endpoint = forders{order_id}metafields.json
-    json_data = {
-        metafield {
-            namespace custom,
-            key assigned_nft_details,
-            value metafield_value,
-            type json_string
-        }
-    }
-    return shopify_admin_api_request(POST, endpoint, json_data)
+    # Get available NFT products from Shopify
+    available_nfts = get_available_nft_products()
+    logging.info(f"Available NFTs found: {available_nfts}")
 
-def decrease_nft_inventory(inventory_item_id)
-    减少指定库存项目的库存数量
-    endpoint = inventory_levelsadjust.json
-    json_data = {
-        location_id int(SHOPIFY_LOCATION_ID),
-        inventory_item_id inventory_item_id,
-        available_adjustment -1
-    }
-    return shopify_admin_api_request(POST, endpoint, json_data)
+    if not available_nfts:
+        logging.warning("No available NFT products found to assign.")
+        return jsonify({"message": "No NFT products available for assignment"}), 200
 
-# --- Flask 路由 ---
-@app.route('')
-def home()
-    return NFT Blind Box Allocator App is running!, 200
+    # For simplicity, assign the first available NFT product
+    assigned_nft = available_nfts[0]
+    nft_product_id = assigned_nft['product_id']
+    nft_variant_id = assigned_nft['variant_id']
+    nft_sku = assigned_nft['variant_sku']
+    nft_inventory_item_id = assigned_nft['inventory_item_id']
+    nft_current_quantity = assigned_nft['inventory_quantity']
 
-# !!! 临时调试路由：捕获所有 POST 请求 !!!
-# 确保此路由在 webhooksorderspaid 路由之前定义，这样如果精确匹配失败，它能捕获到请求。
-@app.route('pathdummy_path', methods=['POST'])
-def catch_all_post(dummy_path)
-    print(fDEBUG 捕获到 POST 请求到未知路径 {dummy_path})
-    print(fDEBUG 请求头部 {request.headers})
-    try
-        request_data = request.json
-        print(fDEBUG JSON Data (捕获) {request_data})
-    except Exception as e
-        request_data = request.get_data().decode('utf-8', errors='ignore')
-        print(fDEBUG Raw Data (捕获) {request_data})
-    return Not Found (被调试路由捕获), 404 # 仍然向 Make 返回 404
+    logging.info(f"Assigning NFT: SKU={nft_sku}, Product ID={nft_product_id}, Variant ID={nft_variant_id}")
 
-@app.route('webhooksorderspaid', methods=['POST'])
-def handle_orders_paid_webhook()
-    try
-        order_data = request.json
+    # Get the default location ID for inventory update
+    default_location_id = get_default_location_id()
+    if not default_location_id:
+        logging.error("Failed to get default location ID, cannot update inventory.")
+        return jsonify({"message": "Failed to update inventory, no location found"}), 500
 
-        if not order_data
-            print(接收到的请求体为空或不是有效的 JSON。)
-            return 无效的请求体, 400
+    # Decrement the stock of the assigned NFT in Shopify
+    new_quantity = nft_current_quantity - 1
+    if update_shopify_inventory(nft_product_id, nft_inventory_item_id, new_quantity, default_location_id):
+        logging.info(f"Successfully decremented stock for {nft_sku} to {new_quantity}.")
+    else:
+        logging.error(f"Failed to decrement stock for {nft_sku}.")
+        # Even if inventory update fails, we might still proceed to send NFT
+        # depending on business logic, but for now, we'll return an error.
+        return jsonify({"message": "Failed to update NFT inventory"}), 500
 
-        order_id = order_data.get('id')
-        if not order_id
-            print(请求体中缺少订单 ID。)
-            return 缺少订单 ID, 400
+    # Here you would integrate with your NFT minting/transfer logic
+    # For example:
+    # mint_nft_for_customer(email, nft_sku)
+    logging.info(f"Simulating NFT mint/transfer for customer {email} with SKU {nft_sku}")
+    # In a real scenario, you'd call an external API or blockchain interaction here.
 
-        print(f接收到订单支付 Webhook (来自 Make API Pull)，订单 ID {order_id})
+    return jsonify({"message": "Webhook processed successfully", "assigned_nft_sku": nft_sku}), 200
 
-        is_blind_box_order = False
-        for line_item in order_data.get('line_items', [])
-            if line_item.get('sku') == BLIND_BOX_SKU
-                is_blind_box_order = True
-                break
+# Catch-all route for debugging unexpected requests
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def catch_all(path):
+    logging.debug(f"DEBUG: Catch-all route triggered for path: /{path}")
+    logging.debug(f"DEBUG: Method: {request.method}")
+    logging.debug(f"DEBUG: Headers: {request.headers}")
+    if request.is_json:
+        logging.debug(f"DEBUG: JSON Data (catch-all): {request.json}")
+    else:
+        logging.debug(f"DEBUG: Form Data (catch-all): {request.form}")
+    logging.debug(f"DEBUG: Raw Data (catch-all): {request.data}")
+    logging.debug(f"DEBUG: Expected webhook route repr(): {'/webhooks/orders/paid'}")
 
-        if not is_blind_box_order
-            print(f订单 {order_id} 不包含盲盒产品，跳过处理。)
-            return 非盲盒订单, 200
+    # If the exact webhook path was hit, but not by the specific route, log that.
+    if path == 'webhooks/orders/paid':
+        logging.debug(f"DEBUG: Caught POST request to unrecognized path: /{path}")
+        logging.debug(f"DEBUG: Headers: {request.headers}")
+        if request.is_json:
+            logging.debug(f"DEBUG: JSON Data (捕获): {request.json}")
+        else:
+            logging.debug(f"DEBUG: Form Data (捕获): {request.form}")
 
-        available_nfts = get_available_nft_products()
 
-        if not available_nfts
-            print(f没有可用的 NFT 产品可以分配给订单 {order_id}。)
-            return 没有可用 NFT, 200
+    return jsonify({"message": f"Hello from catch-all route! Path: /{path}"}), 200
 
-        selected_nft = random.choice(available_nfts)
-        print(f为订单 {order_id} 选择了 NFT SKU={selected_nft['sku']}, Prod ID={selected_nft['product_id']}, Inv Item ID={selected_nft['inventory_item_id']})
-
-        add_nft_to_order_metafield(
-            order_id,
-            selected_nft['sku'],
-            selected_nft['image_url'],
-            selected_nft['product_id']
-        )
-
-        decrease_nft_inventory(selected_nft['inventory_item_id'])
-
-        print(f订单 {order_id} 处理成功。NFT '{selected_nft['sku']}' 已分配并减少库存。)
-        return OK, 200
-
-    except Exception as e
-        print(f处理 Webhook 时发生错误 {e})
-        return 内部服务器错误, 500
-
-if __name__ == '__main__'
-    port = int(os.environ.get('PORT', 5000))
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
