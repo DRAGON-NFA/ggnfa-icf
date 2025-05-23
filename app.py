@@ -3,8 +3,8 @@ import sqlite3
 import random
 import logging
 from flask import Flask, request, jsonify
-import json # 确保导入了 json 模块
-import requests # 用于可能的外部 API 调用，如果不需要可以移除
+import json
+import requests # 用于外部 API 调用，此库是必需的
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,8 +13,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 app = Flask(__name__)
 
 # 数据库文件路径
-# 在 Render 上，如果需要持久化数据，需要配置持久化磁盘
-# 否则，每次部署或服务重启，数据库都会重置
 DATABASE = 'nft_inventory.db'
 
 # NFT 数据定义
@@ -110,13 +108,12 @@ def init_db():
             conn.close()
 
 # 在应用程序启动时调用数据库初始化
-# app.app_context() 确保在 Flask 应用程序上下文中执行数据库操作
 with app.app_context():
     init_db()
 
 # 分配 NFT 给订单的函数
 def assign_nft_to_order(order_id, customer_email):
-    conn = None # 初始化 conn 为 None
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
@@ -133,8 +130,6 @@ def assign_nft_to_order(order_id, customer_email):
             }
 
         # 2. 查找一个未分配的 NFT
-        # 注意：这里使用 ORDER BY RANDOM() 确保随机性，但对于大型数据库可能效率不高
-        # 更好的做法是在应用层随机选择一个索引，然后获取该 NFT
         cursor.execute("SELECT item_id, item_name, image_url FROM nft_inventory WHERE is_assigned = 0 ORDER BY RANDOM() LIMIT 1")
         available_nft = cursor.fetchone()
 
@@ -183,7 +178,7 @@ def orders_paid_webhook():
 
     # 获取原始请求体数据
     raw_data = request.get_data(as_text=True)
-    logging.info(f"Raw incoming data: {raw_data!r}") # 使用 !r 显示原始字符串表示，便于调试
+    logging.info(f"Raw incoming data: {raw_data!r}")
 
     # 检查请求体是否为空
     if not raw_data:
@@ -191,17 +186,15 @@ def orders_paid_webhook():
         return jsonify({"status": "error", "message": "Received empty request body"}), 400
 
     # 尝试手动解析原始数据为 JSON
-    data = None # 初始化 data 变量
+    data = None
     try:
         data = json.loads(raw_data)
         logging.info(f"Manually parsed JSON data: {data}")
 
     except json.JSONDecodeError as e:
         logging.error(f"Failed to decode JSON from raw data: {e}")
-        # 如果 raw_data 不是有效的 JSON，返回 400 Bad Request
         return jsonify({"status": "error", "message": f"Invalid JSON received: {e}"}), 400
     except Exception as e:
-        # 捕获其他解析错误
         logging.error(f"Unexpected error during manual JSON parsing: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"An unexpected parsing error occurred: {e}"}), 400
 
@@ -209,10 +202,11 @@ def orders_paid_webhook():
     try:
         # 从解析后的 JSON 数据中提取关键信息
         order_id = data.get('id')
-        customer_email = data.get('contact_email') or data.get('email') # 优先使用 contact_email
-        current_total_price = float(data.get('current_total_price', 0.0)) # 提供默认值以防键不存在
+        # Shopify 订单的联系邮箱可能在 'contact_email' 或 'email' 字段
+        customer_email = data.get('contact_email') or data.get('email')
+        current_total_price = float(data.get('current_total_price', 0.0))
         currency = data.get('currency')
-        order_name = data.get('name') # 例如： "#1018NFA"
+        order_name = data.get('name')
 
         # 检查关键数据是否存在
         if not all([order_id, customer_email, currency, order_name]):
@@ -221,86 +215,72 @@ def orders_paid_webhook():
 
         logging.info(f"Webhook data received for order {order_id}: Email={customer_email}, Total Price={current_total_price} {currency}, Order Name={order_name}")
 
-        # 在这里可以添加其他业务逻辑，例如：
-        # - 验证 Shopify Webhook 签名 (强烈推荐用于生产环境)
-        # - 检查订单状态是否确实为 'paid' (data.get('financial_status') == 'paid')
-        # - 根据订单内容（line_items）决定是否分配 NFT
-
         # 分配 NFT
         assigned_nft_info = assign_nft_to_order(order_id, customer_email)
 
         if assigned_nft_info:
             logging.info(f"Successfully processed order {order_id}. Assigned NFT: {assigned_nft_info['name']} (ID: {assigned_nft_info['id']})")
 
-            # 如果需要，可以在这里调用 Shopify Admin API 更新订单的 note_attributes
-            # 这需要您的 Render 服务有 Shopify Admin API 凭据和权限
-            # 并且需要安装 'shopifyapi' 或 'requests' 库来发送 HTTP 请求
+            # **** Shopify Admin API 调用部分 - 已取消注释 ****
+            SHOPIFY_STORE_URL = os.environ.get("SHOPIFY_STORE_URL")
+            SHOPIFY_ADMIN_API_ACCESS_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_ACCESS_TOKEN")
 
-            # 示例：更新 Shopify 订单的 note_attributes
-            # （此部分需要您的 Shopify Admin API 凭据和更复杂的逻辑）
-            # SHOPIFY_STORE_URL = os.environ.get("SHOPIFY_STORE_URL") # 例如 your-store.myshopify.com
-            # SHOPIFY_ADMIN_API_ACCESS_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_ACCESS_TOKEN")
-
-            # if SHOPIFY_STORE_URL and SHOPIFY_ADMIN_API_ACCESS_TOKEN:
-            #     order_update_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
-            #     headers = {
-            #         "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_ACCESS_TOKEN,
-            #         "Content-Type": "application/json"
-            #     }
-            #     # 构建要更新的 note_attributes
-            #     # 注意：这会替换现有 note_attributes，如果需要追加，逻辑会更复杂
-            #     updated_note_attributes = [
-            #         {"name": "Assigned_NFT_ID", "value": assigned_nft_info['id']},
-            #         {"name": "Assigned_NFT_Name", "value": assigned_nft_info['name']},
-            #         {"name": "Assigned_NFT_Image", "value": assigned_nft_info['image_url']}
-            #     ]
-            #     update_payload = {
-            #         "order": {
-            #             "id": order_id,
-            #             "note_attributes": updated_note_attributes
-            #         }
-            #     }
-            #     try:
-            #         response = requests.put(order_update_url, headers=headers, json=update_payload)
-            #         response.raise_for_status() # 如果状态码不是 2xx，则抛出 HTTPError
-            #         logging.info(f"Successfully updated Shopify order {order_id} with NFT details.")
-            #     except requests.exceptions.RequestException as req_e:
-            #         logging.error(f"Failed to update Shopify order {order_id} via Admin API: {req_e}. Response: {response.text if response else 'N/A'}")
-            # else:
-            #     logging.warning("Shopify Admin API credentials not set. Cannot update order note_attributes.")
-
+            if SHOPIFY_STORE_URL and SHOPIFY_ADMIN_API_ACCESS_TOKEN:
+                # 注意 Shopify API 版本，这里使用 2024-07，您可以根据实际情况调整
+                order_update_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
+                headers = {
+                    "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_ACCESS_TOKEN,
+                    "Content-Type": "application/json"
+                }
+                # 构建要更新的 note_attributes
+                # 注意：这会替换订单中现有的 note_attributes。
+                # 如果您需要追加而不是替换，逻辑会更复杂，需要先获取现有 attributes。
+                updated_note_attributes = [
+                    {"name": "Assigned_NFT_ID", "value": assigned_nft_info['id']},
+                    {"name": "Assigned_NFT_Name", "value": assigned_nft_info['name']},
+                    {"name": "Assigned_NFT_Image_URL", "value": assigned_nft_info['image_url']} # 确保这里是正确的键名
+                ]
+                update_payload = {
+                    "order": {
+                        "id": order_id,
+                        "note_attributes": updated_note_attributes
+                    }
+                }
+                try:
+                    response = requests.put(order_update_url, headers=headers, json=update_payload)
+                    response.raise_for_status() # 如果状态码不是 2xx，则抛出 HTTPError
+                    logging.info(f"Successfully updated Shopify order {order_id} with NFT details.")
+                except requests.exceptions.RequestException as req_e:
+                    logging.error(f"Failed to update Shopify order {order_id} via Admin API: {req_e}. Response: {response.text if response else 'N/A'}")
+            else:
+                logging.warning("Shopify Admin API credentials (SHOPIFY_STORE_URL or SHOPIFY_ADMIN_API_ACCESS_TOKEN) not set. Cannot update order note_attributes.")
+            # **** Shopify Admin API 调用部分结束 ****
 
             return jsonify({
                 "status": "success",
                 "message": "Webhook processed successfully",
                 "order_id": order_id,
-                "assigned_nft": assigned_nft_info # 返回完整的 NFT 信息
+                "assigned_nft": assigned_nft_info
             }), 200
         else:
             logging.error(f"Failed to assign NFT for order {order_id}. No NFTs available or database error.")
             return jsonify({"status": "error", "message": "Failed to assign NFT"}), 500
 
     except AttributeError as e:
-        # 当 data 不是字典（例如是 int 或 None）时会发生
         logging.error(f"AttributeError in webhook processing: {e}. Data received was not a dictionary as expected. Raw data: {raw_data!r}")
         return jsonify({"status": "error", "message": f"Invalid data format received: {e}"}), 400
     except KeyError as e:
-        # 当尝试访问不存在的键时会发生
         logging.error(f"KeyError in webhook processing: Missing data key: {e}. Raw data: {raw_data!r}")
         return jsonify({"status": "error", "message": f"Missing expected data key: {e}"}), 400
     except ValueError as e:
-        # 当 float() 转换失败时会发生
         logging.error(f"ValueError in webhook processing: Data type conversion error: {e}. Raw data: {raw_data!r}")
         return jsonify({"status": "error", "message": f"Data type conversion error: {e}"}), 400
     except Exception as e:
-        # 捕获所有其他意外错误
         logging.error(f"Unexpected error during webhook processing: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"An unexpected error occurred: {e}"}), 500
 
 # 应用程序入口点
 if __name__ == '__main__':
-    # 在生产环境中，Gunicorn 会处理端口，所以这个 if 块通常只用于本地测试
-    # Render 会通过命令行参数设置 $PORT 环境变量
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
 
