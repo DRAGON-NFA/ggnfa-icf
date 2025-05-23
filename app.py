@@ -10,7 +10,7 @@ import requests # 用于外部 API 调用，此库是必需的
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 初始化 Flask 应用
-app = Flask(__name__)
+app = Flask(__app__)
 
 # 数据库文件路径
 DATABASE = 'nft_inventory.db'
@@ -39,8 +39,6 @@ TEST_IMAGE_URLS = [
     "https://images.unsplash.com/photo-1508921912186-1d1a45fa5342?w=400&h=400&fit=crop&q=80", # 极简主义
     "https://images.unsplash.com/photo-1516542076529-1bbd85698717?w=400&h=400&fit=crop&q=80", # 科技感
     "https://images.unsplash.com/photo-1518066000714-cdcd82531e89?w=400&h=400&fit=crop&q=80"  # 赛博朋克
-    # ... 您可以添加更多图片 URL，确保至少有 NUM_MAIN_SERIES 数量的图片
-    # 如果您的实际图片数量少于 NUM_MAIN_SERIES，请重复使用或调整逻辑
 ]
 
 # 填充 NFT_ITEMS_DATA 列表
@@ -226,7 +224,7 @@ def orders_paid_webhook():
         if assigned_nft_info:
             logging.info(f"Successfully processed order {order_id}. Assigned NFT: {assigned_nft_info['name']} (ID: {assigned_nft_info['id']})")
 
-            # **** Shopify Admin API 调用部分 - 已取消注释 ****
+            # **** Shopify Admin API 调用部分 - 增强了错误日志 ****
             SHOPIFY_STORE_URL = os.environ.get("SHOPIFY_STORE_URL")
             SHOPIFY_ADMIN_API_ACCESS_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_ACCESS_TOKEN")
 
@@ -247,16 +245,27 @@ def orders_paid_webhook():
                 ]
                 update_payload = {
                     "order": {
-                        "id": order_id,
+                        "id": order_id, 
                         "note_attributes": updated_note_attributes
                     }
                 }
+                # 打印发送的 payload，以便调试
+                logging.info(f"Attempting to update Shopify order {order_id} with payload: {json.dumps(update_payload)}")
                 try:
                     response = requests.put(order_update_url, headers=headers, json=update_payload)
                     response.raise_for_status() # 如果状态码不是 2xx，则抛出 HTTPError
                     logging.info(f"Successfully updated Shopify order {order_id} with NFT details.")
                 except requests.exceptions.RequestException as req_e:
-                    logging.error(f"Failed to update Shopify order {order_id} via Admin API: {req_e}. Response: {response.text if response else 'N/A'}")
+                    # 捕获请求异常，并尝试打印响应内容
+                    error_response_text = "N/A"
+                    if response is not None:
+                        try:
+                            error_response_text = response.text # 尝试获取响应文本
+                            logging.error(f"Shopify API Error Status Code: {response.status_code}")
+                            logging.error(f"Shopify API Error Response Body: {error_response_text}") # 打印响应体
+                        except Exception as inner_e:
+                            logging.error(f"Could not get response text from Shopify API: {inner_e}")
+                    logging.error(f"Failed to update Shopify order {order_id} via Admin API: {req_e}. Full response details in preceding log lines.")
             else:
                 logging.warning("Shopify Admin API credentials (SHOPIFY_STORE_URL or SHOPIFY_ADMIN_API_ACCESS_TOKEN) not set. Cannot update order note_attributes.")
             # **** Shopify Admin API 调用部分结束 ****
