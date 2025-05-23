@@ -225,7 +225,7 @@ def orders_paid_webhook():
                     "Content-Type": "application/json"
                 }
                 
-                # --- 新增步骤：首先获取当前订单的 note_attributes ---
+                # --- 首先获取当前订单的 note_attributes ---
                 get_order_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
                 existing_note_attributes = []
                 try:
@@ -244,32 +244,42 @@ def orders_paid_webhook():
                         except Exception as inner_e:
                             logging.error(f"Could not get response text from Shopify GET API: {inner_e}")
                     logging.error(f"Failed to retrieve existing note_attributes for Shopify order {order_id}: {get_req_e}. Proceeding with only new attributes.")
-                    # 如果获取失败，我们仍然继续，但只添加新的属性
                     existing_note_attributes = [] 
 
 
                 # --- 构建要更新的 note_attributes (追加新属性) ---
                 updated_note_attributes = list(existing_note_attributes) # 复制现有属性
-                # 添加我们的 NFT 属性
-                updated_note_attributes.append({"name": "Assigned_NFT_ID", "value": str(assigned_nft_info['id'])})
-                updated_note_attributes.append({"name": "Assigned_NFT_Name", "value": str(assigned_nft_info['name'])})
-                updated_note_attributes.append({"name": "Assigned_NFT_Image_URL", "value": str(assigned_nft_info['image_url'])})
+                # 检查是否已存在 NFT 属性，如果存在则更新，否则添加
+                # 避免重复添加相同的 NFT 属性
+                nft_id_exists = False
+                for attr in updated_note_attributes:
+                    if attr.get('name') == "Assigned_NFT_ID":
+                        attr['value'] = str(assigned_nft_info['id'])
+                        nft_id_exists = True
+                    if attr.get('name') == "Assigned_NFT_Name":
+                        attr['value'] = str(assigned_nft_info['name'])
+                    if attr.get('name') == "Assigned_NFT_Image_URL":
+                        attr['value'] = str(assigned_nft_info['image_url'])
                 
-                # Shopify API 要求所有的 'value' 必须是字符串
-                # 检查并确保所有值都是字符串
+                if not nft_id_exists:
+                    updated_note_attributes.append({"name": "Assigned_NFT_ID", "value": str(assigned_nft_info['id'])})
+                    updated_note_attributes.append({"name": "Assigned_NFT_Name", "value": str(assigned_nft_info['name'])})
+                    updated_note_attributes.append({"name": "Assigned_NFT_Image_URL", "value": str(assigned_nft_info['image_url'])})
+                
+                # 确保所有 note_attribute 的 value 都是字符串类型
                 for attr in updated_note_attributes:
                     attr['value'] = str(attr['value'])
 
 
                 update_payload = {
                     "order": {
-                        "id": order_id, 
+                        # 移除这里的 "id": order_id，因为 ID 已经在 URL 中提供
                         "note_attributes": updated_note_attributes
                     }
                 }
                 
                 # 打印发送的 payload，以便调试
-                logging.info(f"Attempting to update Shopify order {order_id} with payload: {json.dumps(update_payload, ensure_ascii=False)}") # ensure_ascii=False for Chinese chars
+                logging.info(f"Attempting to update Shopify order {order_id} with payload: {json.dumps(update_payload, ensure_ascii=False)}")
                 
                 # --- 发送 PUT 请求更新订单 ---
                 order_update_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
@@ -282,9 +292,9 @@ def orders_paid_webhook():
                     error_response_text = "N/A"
                     if response is not None:
                         try:
-                            error_response_text = response.text # 尝试获取响应文本
+                            error_response_text = response.text
                             logging.error(f"Shopify API Error Status Code: {response.status_code}")
-                            logging.error(f"Shopify API Error Response Body: {error_response_text}") # 打印响应体
+                            logging.error(f"Shopify API Error Response Body: {error_response_text}")
                         except Exception as inner_e:
                             logging.error(f"Could not get response text from Shopify API: {inner_e}")
                     logging.error(f"Failed to update Shopify order {order_id} via Admin API: {req_e}. Full response details in preceding log lines.")
