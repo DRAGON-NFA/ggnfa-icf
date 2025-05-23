@@ -1,190 +1,138 @@
+# app.py
 import os
 import sys
-import hmac
-import hashlib
-import base64
-import requests
-from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 import logging
+from flask import Flask, request, jsonify
+import requests
+import json
+import random
+from datetime import datetime
 
-# Load .env
-load_dotenv()
+# 从新的 database.py 和 nft_data.py 导入
+from database import init_db, get_unassigned_nft, record_assignment, check_order_assigned
+from nft_data import NFT_ITEMS # 假设 NFT_ITEMS 定义在 nft_data.py 中
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Flask app
 app = Flask(__name__)
 
-# Required env vars
-REQUIRED_ENV_VARS = [
-    "SHOPIFY_API_KEY", "SHOPIFY_API_PASSWORD", "SHOPIFY_SHOP_NAME", "SHOPIFY_WEBHOOK_SECRET"
-]
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-if not all(os.environ.get(var) for var in REQUIRED_ENV_VARS):
-    logging.error("Missing required environment variables.")
+# 从环境变量加载 Shopify API 凭证
+SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
+SHOPIFY_API_PASSWORD = os.getenv('SHOPIFY_API_PASSWORD')
+SHOPIFY_SHOP_NAME = os.getenv('SHOPIFY_SHOP_NAME')
+SHOPIFY_API_VERSION = os.getenv('SHOPIFY_API_VERSION', '2024-04') # 默认使用最新稳定版本
+
+if not all([SHOPIFY_API_KEY, SHOPIFY_API_PASSWORD, SHOPIFY_SHOP_NAME]):
+    logging.error("ERROR: Missing required environment variables. Please check your Render configuration.")
     sys.exit(1)
 
-# Environment vars
-SHOPIFY_API_KEY = os.environ["SHOPIFY_API_KEY"]
-SHOPIFY_API_PASSWORD = os.environ["SHOPIFY_API_PASSWORD"]
-SHOPIFY_SHOP_NAME = os.environ["SHOPIFY_SHOP_NAME"]
-SHOPIFY_WEBHOOK_SECRET = os.environ["SHOPIFY_WEBHOOK_SECRET"]
-SHOPIFY_API_VERSION = "2024-04"
+# 构建 Shopify Admin API 基础 URL
+SHOPIFY_ADMIN_API_BASE_URL = f"https://{SHOPIFY_API_KEY}:{SHOPIFY_API_PASSWORD}@{SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/{SHOPIFY_API_VERSION}"
 
-# Shopify API Base URL
-SHOPIFY_BASE_URL = f"https://{SHOPIFY_API_KEY}:{SHOPIFY_API_PASSWORD}@{SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/{SHOPIFY_API_VERSION}"
+# 在应用启动时初始化数据库
+with app.app_context(): # 确保在Flask应用上下文中执行
+    init_db(NFT_ITEMS)
 
-# Global cache for default location ID
-DEFAULT_LOCATION_ID = None
-
-
-def verify_webhook(data, hmac_header):
-    """Verify Shopify webhook HMAC"""
-    digest = hmac.new(SHOPIFY_WEBHOOK_SECRET.encode("utf-8"), data, hashlib.sha256).digest()
-    computed_hmac = base64.b64encode(digest).decode()
-    return hmac.compare_digest(computed_hmac, hmac_header)
-
-
-def get_default_location_id():
-    """Fetch and cache default location ID."""
-    global DEFAULT_LOCATION_ID
-    if DEFAULT_LOCATION_ID:
-        return DEFAULT_LOCATION_ID
-
-    try:
-        url = f"{SHOPIFY_BASE_URL}/locations.json"
-        headers = {"Content-Type": "application/json"}
-        res = requests.get(url, headers=headers, timeout=10)
-        res.raise_for_status()
-        locations = res.json().get("locations", [])
-        if locations:
-            DEFAULT_LOCATION_ID = locations[0]["id"]
-            return DEFAULT_LOCATION_ID
-        logging.error("No locations found.")
-        return None
-    except Exception as e:
-        logging.error(f"Error fetching locations: {e}")
-        return None
-
-
-def get_available_nft_products():
-    """Fetch NFT variants with SKU prefix 'NFT_SKU_' and inventory > 0."""
-    products_url = f"{SHOPIFY_BASE_URL}/products.json"
-    headers = {"Content-Type": "application/json"}
-    all_nft_products = []
-    page_info = None
-
-    while True:
-        params = {"limit": 250}
-        if page_info:
-            params["page_info"] = page_info
-
-        try:
-            res = requests.get(products_url, headers=headers, params=params, timeout=10)
-            res.raise_for_status()
-            products = res.json().get("products", [])
-
-            for product in products:
-                for variant in product.get("variants", []):
-                    if variant.get("sku", "").startswith("NFT_SKU_") and variant.get("inventory_quantity", 0) > 0:
-                        all_nft_products.append({
-                            "product_id": product["id"],
-                            "product_title": product["title"],
-                            "variant_id": variant["id"],
-                            "variant_sku": variant["sku"],
-                            "inventory_quantity": variant["inventory_quantity"],
-                            "inventory_item_id": variant["inventory_item_id"]
-                        })
-
-            # Handle pagination
-            link_header = res.headers.get("link")
-            if link_header and 'rel="next"' in link_header:
-                import re
-                match = re.search(r'page_info=([^&>]+)', link_header)
-                page_info = match.group(1) if match else None
-            else:
-                break
-        except Exception as e:
-            logging.error(f"Error fetching products: {e}")
-            break
-
-    logging.info(f"Found {len(all_nft_products)} available NFT products.")
-    return all_nft_products
-
-
-def update_shopify_inventory(inventory_item_id, new_quantity, location_id):
-    """Update inventory quantity via Shopify API"""
-    url = f"{SHOPIFY_BASE_URL}/inventory_levels/set.json"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "inventory_item_id": inventory_item_id,
-        "location_id": location_id,
-        "set_quantity": new_quantity
-    }
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        res.raise_for_status()
-        logging.info(f"Inventory updated: {inventory_item_id} -> {new_quantity}")
-        return True
-    except Exception as e:
-        logging.error(f"Failed to update inventory: {e}")
-        return False
-
+@app.route('/')
+def home():
+    """简单的健康检查路由"""
+    logging.info("Received GET request to /")
+    return jsonify({"message": "NFT Blind Box Webhook Service is running!"}), 200
 
 @app.route('/webhooks/orders/paid', methods=['POST'])
-def order_paid_webhook():
-    logging.info("Webhook triggered: /webhooks/orders/paid")
+def orders_paid_webhook():
+    """处理Shopify订单支付Webhook"""
+    logging.info("Received POST request to /webhooks/orders/paid (Shopify Order Paid Webhook).")
 
-    hmac_header = request.headers.get("X-Shopify-Hmac-Sha256")
-    if not verify_webhook(request.data, hmac_header):
-        logging.warning("Invalid webhook signature.")
-        return jsonify({"message": "Unauthorized"}), 401
+    try:
+        data = request.json
+        if not data:
+            logging.warning("Received empty or non-JSON request body.")
+            return jsonify({"message": "Invalid JSON"}), 400
 
-    data = request.get_json()
-    if not data:
-        return jsonify({"message": "Invalid payload"}), 400
+        order_id = data.get('id')
+        customer_email = data.get('email')
+        order_number = data.get('order_number')
 
-    order_id = data.get("id")
-    email = data.get("email")
-    logging.info(f"Processing order: {order_id} for {email}")
+        if not order_id:
+            logging.error("Order ID not found in webhook data.")
+            return jsonify({"message": "Order ID missing"}), 400
 
-    available_nfts = get_available_nft_products()
-    if not available_nfts:
-        return jsonify({"message": "No NFT products available"}), 200
+        logging.info(f"Processing order ID: {order_id}, Order Number: {order_number}, Customer email: {customer_email}")
 
-    assigned_nft = available_nfts[0]
-    new_quantity = assigned_nft["inventory_quantity"] - 1
+        # 检查订单是否已经分配过NFT，避免重复处理
+        if check_order_assigned(str(order_id)):
+            logging.info(f"Order ID {order_id} already has an NFT assigned. Skipping re-assignment.")
+            return jsonify({"message": "Order already processed"}), 200 # 返回成功，不重试
 
-    location_id = get_default_location_id()
-    if not location_id:
-        return jsonify({"message": "No location found"}), 500
+        # --- NFT 分配逻辑 ---
+        assigned_nft = get_unassigned_nft() # 从数据库获取并标记一个未分配NFT
 
-    if not update_shopify_inventory(assigned_nft["inventory_item_id"], new_quantity, location_id):
-        return jsonify({"message": "Failed to update inventory"}), 500
+        if assigned_nft:
+            nft_id = assigned_nft['nft_id']
+            nft_image_url = assigned_nft['image_url']
+            nft_name = assigned_nft['name']
 
-    # Simulated NFT minting
-    logging.info(f"Simulate mint NFT for {email} with SKU {assigned_nft['variant_sku']}")
+            logging.info(f"Assigned NFT: {nft_id} (Image: {nft_image_url}, Name: {nft_name}) to Order {order_id}.")
 
-    return jsonify({
-        "message": "NFT assigned",
-        "assigned_nft_sku": assigned_nft["variant_sku"]
-    }), 200
+            # --- 更新 Shopify 订单的 note_attributes ---
+            # 这是为了在用户订单详情页显示分配的NFT信息
+            order_update_url = f"{SHOPIFY_ADMIN_API_BASE_URL}/orders/{order_id}.json"
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "order": {
+                    "id": order_id,
+                    "note_attributes": [
+                        {"name": "Assigned_NFT_ID", "value": nft_id},
+                        {"name": "Assigned_NFT_Name", "value": nft_name},
+                        {"name": "Assigned_NFT_Image", "value": nft_image_url},
+                        # 您可以添加更多信息，例如分配时间等
+                        {"name": "NFT_Assignment_Date", "value": datetime.utcnow().isoformat()}
+                    ]
+                }
+            }
 
+            try:
+                shopify_response = requests.put(order_update_url, headers=headers, data=json.dumps(payload))
+                shopify_response.raise_for_status() # 如果状态码不是2xx，则抛出HTTPError
+                logging.info(f"Successfully updated Shopify Order {order_id} with NFT details.")
+                # 记录分配历史
+                record_assignment(nft_id, nft_image_url, nft_name, str(order_id), customer_email)
+                return jsonify({"message": "NFT assigned and order updated successfully!"}), 200
 
-# Catch-all (only if DEBUG_MODE=true)
-if os.getenv("DEBUG_MODE", "false").lower() == "true":
-    @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
-    @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
-    def catch_all(path):
-        logging.debug(f"Caught request to: /{path}")
-        return jsonify({
-            "message": f"DEBUG: Caught path /{path}",
-            "headers": dict(request.headers),
-            "body": request.get_json(silent=True)
-        }), 200
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to update Shopify Order {order_id}. Error: {e}")
+                logging.error(f"Shopify API Response: {shopify_response.text if shopify_response else 'N/A'}")
+                return jsonify({"message": "Failed to update Shopify order"}), 500 # 500 表示服务器内部错误
+
+        else:
+            logging.error("No unassigned NFTs available for distribution.")
+            # 可以在这里触发警报，例如发送邮件给管理员
+            return jsonify({"message": "No NFTs available"}), 503 # 503 Service Unavailable
+
+    except Exception as e:
+        logging.error(f"Error processing webhook: {e}", exc_info=True)
+        return jsonify({"message": "Internal Server Error"}), 500
+
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def catch_all(path):
+    """
+    捕获所有未匹配的请求，用于调试。
+    """
+    logging.debug(f"Catch-all route triggered for path: /{path}")
+    logging.debug(f"Caught {request.method} request to unrecognized path: /{path}")
+    logging.debug(f"Headers: {dict(request.headers)}")
+    if request.is_json:
+        try:
+            logging.debug(f"JSON Data (捕获): {json.dumps(request.json, indent=2)}")
+        except Exception as e:
+            logging.debug(f"Could not parse JSON data: {e}")
+            logging.debug(f"Raw Data: {request.get_data(as_text=True)}")
+    else:
+        logging.debug(f"Raw Data (捕获): {request.get_data(as_text=True)}")
+    return jsonify({"message": f"Path /{path} not found or not handled by specific webhook. Check logs for details."}), 404
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    # 仅在本地开发时运行，Render 会使用 gunicorn 启动
+    app.run(debug=True, host='0.0.0.0', port=os.getenv('PORT', 5000))
