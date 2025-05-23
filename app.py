@@ -10,7 +10,7 @@ import requests
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 初始化 Flask 应用
-app = Flask(__name__) # 修正了这里的 '__app__' 为 '__name__'
+app = Flask(__name__)
 
 # 数据库文件路径
 DATABASE = 'nft_inventory.db'
@@ -51,44 +51,37 @@ logging.info(f"Generated {len(NFT_ITEMS_DATA)} unique NFT items.")
 
 # 数据库初始化函数
 def init_db():
-    conn = None # 初始化 conn 为 None
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
 
-        # 创建 nft_inventory 表
-        # item_name 存储 NFT 的唯一标识符（例如 NFT_001_01）
-        # is_assigned 标记该 NFT 是否已被分配 (0: 未分配, 1: 已分配)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS nft_inventory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item_id TEXT NOT NULL UNIQUE, -- 存储 NFT_ITEMS_DATA 中的 id
-                item_name TEXT NOT NULL,      -- 存储 NFT_ITEMS_DATA 中的 name
-                image_url TEXT NOT NULL,      -- 存储 NFT_ITEMS_DATA 中的 image_url
+                item_id TEXT NOT NULL UNIQUE,
+                item_name TEXT NOT NULL,
+                image_url TEXT NOT NULL,
                 is_assigned INTEGER DEFAULT 0
             )
         ''')
         logging.info("nft_inventory table created or already exists.")
 
-        # 创建 assigned_nfts 表
-        # 记录哪个订单 ID 获得了哪个 NFT
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS assigned_nfts (
-                order_id TEXT UNIQUE NOT NULL,    -- Shopify 订单的唯一 ID
-                customer_email TEXT NOT NULL,     -- 购买者的邮箱
-                assigned_nft_id TEXT NOT NULL,    -- 分配的 NFT 的 item_id
-                assigned_nft_name TEXT NOT NULL,  -- 分配的 NFT 的 item_name
-                assigned_nft_image TEXT NOT NULL, -- 分配的 NFT 的 image_url
+                order_id TEXT UNIQUE NOT NULL,
+                customer_email TEXT NOT NULL,
+                assigned_nft_id TEXT NOT NULL,
+                assigned_nft_name TEXT NOT NULL,
+                assigned_nft_image TEXT NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         logging.info("assigned_nfts table created or already exists.")
 
-        # 检查 nft_inventory 是否为空，如果为空则填充数据
         cursor.execute("SELECT COUNT(*) FROM nft_inventory")
         if cursor.fetchone()[0] == 0:
             logging.info(f"Populating nft_inventory table with {len(NFT_ITEMS_DATA)} initial NFT items.")
-            # 使用 NFT_ITEMS_DATA 填充
             data_to_insert = [(item['id'], item['name'], item['image_url']) for item in NFT_ITEMS_DATA]
             cursor.executemany("INSERT INTO nft_inventory (item_id, item_name, image_url) VALUES (?, ?, ?)", data_to_insert)
             conn.commit()
@@ -103,18 +96,15 @@ def init_db():
         if conn:
             conn.close()
 
-# 在应用程序启动时调用数据库初始化
 with app.app_context():
     init_db()
 
-# 分配 NFT 给订单的函数
 def assign_nft_to_order(order_id, customer_email):
     conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
 
-        # 1. 检查订单是否已经分配过 NFT
         cursor.execute("SELECT assigned_nft_id, assigned_nft_name, assigned_nft_image FROM assigned_nfts WHERE order_id = ?", (order_id,))
         existing_assignment = cursor.fetchone()
         if existing_assignment:
@@ -125,17 +115,14 @@ def assign_nft_to_order(order_id, customer_email):
                 "image_url": existing_assignment[2]
             }
 
-        # 2. 查找一个未分配的 NFT
         cursor.execute("SELECT item_id, item_name, image_url FROM nft_inventory WHERE is_assigned = 0 ORDER BY RANDOM() LIMIT 1")
         available_nft = cursor.fetchone()
 
         if available_nft:
             nft_id, nft_name, nft_image_url = available_nft
             
-            # 3. 将 NFT 标记为已分配
             cursor.execute("UPDATE nft_inventory SET is_assigned = 1 WHERE item_id = ?", (nft_id,))
             
-            # 4. 记录分配到 assigned_nfts 表
             cursor.execute("INSERT INTO assigned_nfts (order_id, customer_email, assigned_nft_id, assigned_nft_name, assigned_nft_image) VALUES (?, ?, ?, ?, ?)",
                            (order_id, customer_email, nft_id, nft_name, nft_image_url))
             conn.commit()
@@ -152,7 +139,7 @@ def assign_nft_to_order(order_id, customer_email):
     except sqlite3.Error as e:
         logging.error(f"Database error during NFT assignment for order {order_id}: {e}")
         if conn:
-            conn.rollback() # 回滚事务以防出错
+            conn.rollback()
         return None
     except Exception as e:
         logging.error(f"Unexpected error during NFT assignment for order {order_id}: {e}", exc_info=True)
@@ -161,27 +148,22 @@ def assign_nft_to_order(order_id, customer_email):
         if conn:
             conn.close()
 
-# 主页路由，用于健康检查或简单信息展示
 @app.route('/')
 def home():
     logging.info("Received GET request to /")
     return "NFT Inventory Service is running! Webhook endpoint: /webhooks/orders/paid"
 
-# Shopify 订单支付 Webhook 接收端点
 @app.route('/webhooks/orders/paid', methods=['POST'])
 def orders_paid_webhook():
     logging.info("Received POST request to /webhooks/orders/paid (Shopify Order Paid Webhook).")
 
-    # 获取原始请求体数据
     raw_data = request.get_data(as_text=True)
     logging.info(f"Raw incoming data: {raw_data!r}")
 
-    # 检查请求体是否为空
     if not raw_data:
         logging.error("Error: Received empty request body.")
         return jsonify({"status": "error", "message": "Received empty request body"}), 400
 
-    # 尝试手动解析原始数据为 JSON
     data = None
     try:
         data = json.loads(raw_data)
@@ -194,23 +176,19 @@ def orders_paid_webhook():
         logging.error(f"Unexpected error during manual JSON parsing: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"An unexpected parsing error occurred: {e}"}), 400
 
-    # 业务逻辑处理
     try:
-        # 从解析后的 JSON 数据中提取关键信息
         order_id = data.get('id')
         customer_email = data.get('contact_email') or data.get('email')
         current_total_price = float(data.get('current_total_price', 0.0))
         currency = data.get('currency')
         order_name = data.get('name')
 
-        # 检查关键数据是否存在
         if not all([order_id, customer_email, currency, order_name]):
             logging.error(f"Missing essential data in webhook: Order ID={order_id}, Email={customer_email}, Currency={currency}, Order Name={order_name}")
             return jsonify({"status": "error", "message": "Missing essential order data"}), 400
 
         logging.info(f"Webhook data received for order {order_id}: Email={customer_email}, Total Price={current_total_price} {currency}, Order Name={order_name}")
 
-        # 分配 NFT
         assigned_nft_info = assign_nft_to_order(order_id, customer_email)
 
         if assigned_nft_info:
@@ -225,7 +203,6 @@ def orders_paid_webhook():
                     "Content-Type": "application/json"
                 }
                 
-                # --- 首先获取当前订单的 note_attributes ---
                 get_order_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
                 existing_note_attributes = []
                 try:
@@ -247,21 +224,21 @@ def orders_paid_webhook():
                     existing_note_attributes = [] 
 
 
-                # --- 构建要更新的 note_attributes (追加新属性) ---
-                updated_note_attributes = list(existing_note_attributes) # 复制现有属性
+                updated_note_attributes = list(existing_note_attributes)
+                
                 # 检查是否已存在 NFT 属性，如果存在则更新，否则添加
                 # 避免重复添加相同的 NFT 属性
-                nft_id_exists = False
+                nft_id_key_exists = False
                 for attr in updated_note_attributes:
                     if attr.get('name') == "Assigned_NFT_ID":
                         attr['value'] = str(assigned_nft_info['id'])
-                        nft_id_exists = True
+                        nft_id_key_exists = True
                     if attr.get('name') == "Assigned_NFT_Name":
                         attr['value'] = str(assigned_nft_info['name'])
                     if attr.get('name') == "Assigned_NFT_Image_URL":
                         attr['value'] = str(assigned_nft_info['image_url'])
                 
-                if not nft_id_exists:
+                if not nft_id_key_exists:
                     updated_note_attributes.append({"name": "Assigned_NFT_ID", "value": str(assigned_nft_info['id'])})
                     updated_note_attributes.append({"name": "Assigned_NFT_Name", "value": str(assigned_nft_info['name'])})
                     updated_note_attributes.append({"name": "Assigned_NFT_Image_URL", "value": str(assigned_nft_info['image_url'])})
@@ -273,22 +250,19 @@ def orders_paid_webhook():
 
                 update_payload = {
                     "order": {
-                        # 移除这里的 "id": order_id，因为 ID 已经在 URL 中提供
+                        "id": order_id, # 将 order_id 重新添加回 payload
                         "note_attributes": updated_note_attributes
                     }
                 }
                 
-                # 打印发送的 payload，以便调试
                 logging.info(f"Attempting to update Shopify order {order_id} with payload: {json.dumps(update_payload, ensure_ascii=False)}")
                 
-                # --- 发送 PUT 请求更新订单 ---
                 order_update_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
                 try:
                     response = requests.put(order_update_url, headers=headers, json=update_payload)
-                    response.raise_for_status() # 如果状态码不是 2xx，则抛出 HTTPError
+                    response.raise_for_status()
                     logging.info(f"Successfully updated Shopify order {order_id} with NFT details.")
                 except requests.exceptions.RequestException as req_e:
-                    # 捕获请求异常，并尝试打印响应内容
                     error_response_text = "N/A"
                     if response is not None:
                         try:
