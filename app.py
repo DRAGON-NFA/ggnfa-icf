@@ -204,11 +204,11 @@ def orders_paid_webhook():
                 }
                 
                 get_order_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
-                full_order_data = {} # 初始化为字典
+                full_order_data = {}
                 try:
                     get_response = requests.get(get_order_url, headers=headers)
                     get_response.raise_for_status()
-                    full_order_data = get_response.json().get('order', {}) # 获取完整的订单数据
+                    full_order_data = get_response.json().get('order', {})
                     logging.info(f"Successfully retrieved full order data for order {order_id}.")
                 except requests.exceptions.RequestException as get_req_e:
                     error_response_text = "N/A"
@@ -220,15 +220,45 @@ def orders_paid_webhook():
                         except Exception as inner_e:
                             logging.error(f"Could not get response text from Shopify GET API: {inner_e}")
                     logging.error(f"Failed to retrieve full order data for Shopify order {order_id}: {get_req_e}. Cannot update note_attributes without full data.")
-                    # 如果无法获取完整订单数据，则无法进行更新，直接返回错误
                     return jsonify({"status": "error", "message": "Failed to retrieve full order data for update"}), 500
 
+                # --- 清理 full_order_data 中的只读/复杂字段 ---
+                # 这是一个包含所有可能导致 PUT 失败的字段的列表
+                # 目标是只保留 Shopify 允许在 PUT 中修改的字段，例如 id 和 note_attributes
+                fields_to_remove = [
+                    "admin_graphql_api_id", "app_id", "browser_ip", "buyer_accepts_marketing",
+                    "cancel_reason", "cancelled_at", "cart_token", "checkout_id", "checkout_token",
+                    "client_details", "closed_at", "confirmation_number", "created_at",
+                    "current_shipping_price_set", "current_subtotal_price_set", "current_total_additional_fees_set",
+                    "current_total_discounts_set", "current_total_duties_set", "current_total_price_set",
+                    "current_total_tax_set", "customer_locale", "device_id", "discount_codes",
+                    "duties_included", "email", "estimated_taxes", "financial_status",
+                    "fulfillment_status", "landing_site", "landing_site_ref", "location_id",
+                    "merchant_business_entity_id", "merchant_of_record_app_id", "name", # 'name' (order name) is often read-only
+                    "number", "order_number", "order_status_url", "original_total_additional_fees_set",
+                    "original_total_duties_set", "payment_gateway_names", "phone", "po_number",
+                    "presentment_currency", "processed_at", "reference", "referring_site",
+                    "source_identifier", "source_name", "source_url", "subtotal_price_set",
+                    "tags", # tags can be updated, but let's exclude for now to simplify
+                    "tax_exempt", "tax_lines", "taxes_included", "test", "token",
+                    "total_cash_rounding_payment_adjustment_set", "total_cash_rounding_refund_adjustment_set",
+                    "total_discounts_set", "total_line_items_price_set", "total_outstanding",
+                    "total_price_set", "total_shipping_price_set", "total_tax_set",
+                    "total_tip_received", "total_weight", "updated_at", "user_id",
+                    "billing_address", "customer", "discount_applications", "fulfillments",
+                    "line_items", "payment_terms", "refunds", "shipping_address",
+                    "shipping_lines", "returns"
+                ]
 
-                # 从完整订单数据中获取现有 note_attributes
+                # 遍历并移除字段
+                for field in fields_to_remove:
+                    full_order_data.pop(field, None) # 使用 .pop(field, None) 安全移除，如果字段不存在则不报错
+
+                # 从清理后的数据中获取 note_attributes (如果存在的话)
                 existing_note_attributes = full_order_data.get('note_attributes', [])
-                updated_note_attributes = list(existing_note_attributes) # 复制现有属性
+                updated_note_attributes = list(existing_note_attributes)
                 
-                # 检查是否已存在 NFT 属性，如果存在则更新，否则添加
+                # 检查并更新/添加 NFT 属性
                 nft_id_key_exists = False
                 for attr in updated_note_attributes:
                     if attr.get('name') == "Assigned_NFT_ID":
@@ -248,11 +278,14 @@ def orders_paid_webhook():
                 for attr in updated_note_attributes:
                     attr['value'] = str(attr['value'])
 
-                # 将更新后的 note_attributes 放回完整订单数据中
+                # 将更新后的 note_attributes 放回清理后的订单数据中
                 full_order_data['note_attributes'] = updated_note_attributes
 
+                # 确保 order_id 字段存在且类型正确 (Shopify API 期望是整数)
+                full_order_data['id'] = int(order_id)
+
                 update_payload = {
-                    "order": full_order_data # 发送整个修改后的订单对象
+                    "order": full_order_data # 发送清理并修改后的订单对象
                 }
                 
                 logging.info(f"Attempting to update Shopify order {order_id} with payload: {json.dumps(update_payload, ensure_ascii=False)}")
@@ -302,3 +335,4 @@ def orders_paid_webhook():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+
