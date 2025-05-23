@@ -29,11 +29,16 @@ NUM_SUB_SERIES_PER_MAIN = 30 # 每个主系列包含的子系列数量
 # 这里的图片 URL 是示例，您需要替换为您的实际图片链接
 # 确保图片数量与 NUM_MAIN_SERIES 匹配
 TEST_IMAGE_URLS = [
-    "https://placehold.co/400x400/FF5733/FFFFFF?text=NFT+Series+1",
-    "https://placehold.co/400x400/33FF57/000000?text=NFT+Series+2",
-    "https://placehold.co/400x400/3357FF/FFFFFF?text=NFT+Series+3",
-    "https://placehold.co/400x400/FF33A1/000000?text=NFT+Series+4",
-    "https://placehold.co/400x400/A133FF/FFFFFF?text=NFT+Series+5",
+    "https://images.unsplash.com/photo-1549497554-e0b49f5c2f5d?w=400&h=400&fit=crop&q=80", # 抽象艺术
+    "https://images.unsplash.com/photo-1579783902674-fb825d52288b?w=400&h=400&fit=crop&q=80", # 几何抽象
+    "https://images.unsplash.com/photo-1550684376-effd6e810750?w=400&h=400&fit=crop&q=80", # 城市夜景
+    "https://images.unsplash.com/photo-1517420704952-f96c561b365f?w=400&h=400&fit=crop&q=80", # 自然风景
+    "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=400&h=400&fit=crop&q=80", # 海滩日出
+    "https://images.unsplash.com/photo-1506744038136-465a60a35c83?w=400&h=400&fit=crop&q=80", # 山脉
+    "https://images.unsplash.com/photo-1518779578993-ec3579df2682?w=400&h=400&fit=crop&q=80", # 抽象纹理
+    "https://images.unsplash.com/photo-1508921912186-1d1a45fa5342?w=400&h=400&fit=crop&q=80", # 极简主义
+    "https://images.unsplash.com/photo-1516542076529-1bbd85698717?w=400&h=400&fit=crop&q=80", # 科技感
+    "https://images.unsplash.com/photo-1518066000714-cdcd82531e89?w=400&h=400&fit=crop&q=80"  # 赛博朋克
     # ... 您可以添加更多图片 URL，确保至少有 NUM_MAIN_SERIES 数量的图片
     # 如果您的实际图片数量少于 NUM_MAIN_SERIES，请重复使用或调整逻辑
 ]
