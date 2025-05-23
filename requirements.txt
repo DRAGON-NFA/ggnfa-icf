@@ -1,4 +1,4 @@
-flask
-gunicorn
-requests
-python-dotenv
+Flask==3.1.1
+gunicorn==23.0.0
+python-dotenv==1.1.0 # 仅用于本地开发读取.env文件
+requests==2.32.3
