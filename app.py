@@ -10,7 +10,7 @@ import requests # 用于外部 API 调用，此库是必需的
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 初始化 Flask 应用
-app = Flask(__app__)
+app = Flask(__name__)
 
 # 数据库文件路径
 DATABASE = 'nft_inventory.db'
