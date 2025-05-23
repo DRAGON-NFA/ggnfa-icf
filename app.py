@@ -204,13 +204,12 @@ def orders_paid_webhook():
                 }
                 
                 get_order_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
-                existing_note_attributes = []
+                full_order_data = {} # 初始化为字典
                 try:
                     get_response = requests.get(get_order_url, headers=headers)
                     get_response.raise_for_status()
-                    existing_order_data = get_response.json()
-                    existing_note_attributes = existing_order_data.get('order', {}).get('note_attributes', [])
-                    logging.info(f"Successfully retrieved existing note_attributes for order {order_id}: {existing_note_attributes}")
+                    full_order_data = get_response.json().get('order', {}) # 获取完整的订单数据
+                    logging.info(f"Successfully retrieved full order data for order {order_id}.")
                 except requests.exceptions.RequestException as get_req_e:
                     error_response_text = "N/A"
                     if get_response is not None:
@@ -220,14 +219,16 @@ def orders_paid_webhook():
                             logging.error(f"Shopify GET API Error Response Body: {error_response_text}")
                         except Exception as inner_e:
                             logging.error(f"Could not get response text from Shopify GET API: {inner_e}")
-                    logging.error(f"Failed to retrieve existing note_attributes for Shopify order {order_id}: {get_req_e}. Proceeding with only new attributes.")
-                    existing_note_attributes = [] 
+                    logging.error(f"Failed to retrieve full order data for Shopify order {order_id}: {get_req_e}. Cannot update note_attributes without full data.")
+                    # 如果无法获取完整订单数据，则无法进行更新，直接返回错误
+                    return jsonify({"status": "error", "message": "Failed to retrieve full order data for update"}), 500
 
 
-                updated_note_attributes = list(existing_note_attributes)
+                # 从完整订单数据中获取现有 note_attributes
+                existing_note_attributes = full_order_data.get('note_attributes', [])
+                updated_note_attributes = list(existing_note_attributes) # 复制现有属性
                 
                 # 检查是否已存在 NFT 属性，如果存在则更新，否则添加
-                # 避免重复添加相同的 NFT 属性
                 nft_id_key_exists = False
                 for attr in updated_note_attributes:
                     if attr.get('name') == "Assigned_NFT_ID":
@@ -247,12 +248,11 @@ def orders_paid_webhook():
                 for attr in updated_note_attributes:
                     attr['value'] = str(attr['value'])
 
+                # 将更新后的 note_attributes 放回完整订单数据中
+                full_order_data['note_attributes'] = updated_note_attributes
 
                 update_payload = {
-                    "order": {
-                        "id": order_id, # 将 order_id 重新添加回 payload
-                        "note_attributes": updated_note_attributes
-                    }
+                    "order": full_order_data # 发送整个修改后的订单对象
                 }
                 
                 logging.info(f"Attempting to update Shopify order {order_id} with payload: {json.dumps(update_payload, ensure_ascii=False)}")
@@ -302,4 +302,3 @@ def orders_paid_webhook():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
-
