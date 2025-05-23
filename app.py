@@ -1,138 +1,198 @@
-# app.py
 import os
-import sys
+import sqlite3
+import random
 import logging
 from flask import Flask, request, jsonify
-import requests
-import json
-import random
-from datetime import datetime
-
-# 从新的 database.py 和 nft_data.py 导入
-from database import init_db, get_unassigned_nft, record_assignment, check_order_assigned
-from nft_data import NFT_ITEMS # 假设 NFT_ITEMS 定义在 nft_data.py 中
-
-app = Flask(__name__)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 从环境变量加载 Shopify API 凭证
-SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
-SHOPIFY_API_PASSWORD = os.getenv('SHOPIFY_API_PASSWORD')
-SHOPIFY_SHOP_NAME = os.getenv('SHOPIFY_SHOP_NAME')
-SHOPIFY_API_VERSION = os.getenv('SHOPIFY_API_VERSION', '2024-04') # 默认使用最新稳定版本
+app = Flask(__name__)
 
-if not all([SHOPIFY_API_KEY, SHOPIFY_API_PASSWORD, SHOPIFY_SHOP_NAME]):
-    logging.error("ERROR: Missing required environment variables. Please check your Render configuration.")
-    sys.exit(1)
+DATABASE = 'nft_inventory.db'
 
-# 构建 Shopify Admin API 基础 URL
-SHOPIFY_ADMIN_API_BASE_URL = f"https://{SHOPIFY_API_KEY}:{SHOPIFY_API_PASSWORD}@{SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/{SHOPIFY_API_VERSION}"
+# 数据库初始化和 NFT 库存填充
+def init_db():
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
 
-# 在应用启动时初始化数据库
-with app.app_context(): # 确保在Flask应用上下文中执行
-    init_db(NFT_ITEMS)
+        # 创建 nft_inventory 表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS nft_inventory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_name TEXT NOT NULL UNIQUE,
+                is_assigned INTEGER DEFAULT 0
+            )
+        ''')
+        logging.info("nft_inventory table created or already exists.")
+
+        # 创建 assigned_nfts 表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS assigned_nfts (
+                order_id TEXT UNIQUE NOT NULL,
+                customer_email TEXT NOT NULL,
+                assigned_nft TEXT NOT NULL
+            )
+        ''')
+        logging.info("assigned_nfts table created or already exists.")
+
+        # 检查 nft_inventory 是否为空，如果为空则填充数据
+        cursor.execute("SELECT COUNT(*) FROM nft_inventory")
+        if cursor.fetchone()[0] == 0:
+            logging.info("Populating nft_inventory table with 6000 initial NFT items.")
+            nfts = [f"NFT_Item_{i:04d}" for i in range(1, 6001)]
+            cursor.executemany("INSERT INTO nft_inventory (item_name) VALUES (?)", [(nft,) for nft in nfts])
+            conn.commit()
+            logging.info("nft_inventory table populated successfully.")
+        else:
+            logging.info("nft_inventory table already populated.")
+
+        conn.close()
+        logging.info("Database schema initialized successfully (nft_inventory and assigned_nfts tables).")
+    except Exception as e:
+        logging.error(f"Error initializing database: {e}")
+
+# 在应用程序启动时调用数据库初始化
+with app.app_context():
+    init_db()
+
+def assign_nft_to_order(order_id, customer_email):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    try:
+        # 尝试从已分配的 NFT 中查找（如果订单已处理过）
+        cursor.execute("SELECT assigned_nft FROM assigned_nfts WHERE order_id = ?", (order_id,))
+        existing_assignment = cursor.fetchone()
+        if existing_assignment:
+            logging.info(f"Order {order_id} already has an assigned NFT: {existing_assignment[0]}. Skipping re-assignment.")
+            conn.close()
+            return existing_assignment[0]
+
+        # 查找一个未分配的 NFT
+        cursor.execute("SELECT item_name FROM nft_inventory WHERE is_assigned = 0 LIMIT 1")
+        available_nft = cursor.fetchone()
+
+        if available_nft:
+            nft_name = available_nft[0]
+            # 将 NFT 标记为已分配
+            cursor.execute("UPDATE nft_inventory SET is_assigned = 1 WHERE item_name = ?", (nft_name,))
+            # 记录分配到 assigned_nfts 表
+            cursor.execute("INSERT INTO assigned_nfts (order_id, customer_email, assigned_nft) VALUES (?, ?, ?)",
+                           (order_id, customer_email, nft_name))
+            conn.commit()
+            logging.info(f"Assigned NFT '{nft_name}' to order '{order_id}' for '{customer_email}'.")
+            return nft_name
+        else:
+            logging.warning("No unassigned NFTs available in inventory.")
+            return None
+    except sqlite3.Error as e:
+        logging.error(f"Database error during NFT assignment: {e}")
+        conn.rollback() # 回滚事务以防出错
+        return None
+    finally:
+        conn.close()
 
 @app.route('/')
 def home():
-    """简单的健康检查路由"""
     logging.info("Received GET request to /")
-    return jsonify({"message": "NFT Blind Box Webhook Service is running!"}), 200
+    # 您的其他主页逻辑（如果需要）
+    return "NFT Inventory Service is running!"
 
 @app.route('/webhooks/orders/paid', methods=['POST'])
 def orders_paid_webhook():
-    """处理Shopify订单支付Webhook"""
     logging.info("Received POST request to /webhooks/orders/paid (Shopify Order Paid Webhook).")
 
+    # --- 开始调试代码 ---
+    raw_data = request.get_data(as_text=True)
+    logging.info(f"Raw incoming data: {raw_data!r}")  # 使用 !r 显示原始字符串表示
+
+    if not raw_data:
+        logging.error("Error: Received empty request body.")
+        return jsonify({"status": "error", "message": "Received empty request body"}), 400
+
     try:
-        data = request.json
-        if not data:
-            logging.warning("Received empty or non-JSON request body.")
-            return jsonify({"message": "Invalid JSON"}), 400
-
-        order_id = data.get('id')
-        customer_email = data.get('email')
-        order_number = data.get('order_number')
-
-        if not order_id:
-            logging.error("Order ID not found in webhook data.")
-            return jsonify({"message": "Order ID missing"}), 400
-
-        logging.info(f"Processing order ID: {order_id}, Order Number: {order_number}, Customer email: {customer_email}")
-
-        # 检查订单是否已经分配过NFT，避免重复处理
-        if check_order_assigned(str(order_id)):
-            logging.info(f"Order ID {order_id} already has an NFT assigned. Skipping re-assignment.")
-            return jsonify({"message": "Order already processed"}), 200 # 返回成功，不重试
-
-        # --- NFT 分配逻辑 ---
-        assigned_nft = get_unassigned_nft() # 从数据库获取并标记一个未分配NFT
-
-        if assigned_nft:
-            nft_id = assigned_nft['nft_id']
-            nft_image_url = assigned_nft['image_url']
-            nft_name = assigned_nft['name']
-
-            logging.info(f"Assigned NFT: {nft_id} (Image: {nft_image_url}, Name: {nft_name}) to Order {order_id}.")
-
-            # --- 更新 Shopify 订单的 note_attributes ---
-            # 这是为了在用户订单详情页显示分配的NFT信息
-            order_update_url = f"{SHOPIFY_ADMIN_API_BASE_URL}/orders/{order_id}.json"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "order": {
-                    "id": order_id,
-                    "note_attributes": [
-                        {"name": "Assigned_NFT_ID", "value": nft_id},
-                        {"name": "Assigned_NFT_Name", "value": nft_name},
-                        {"name": "Assigned_NFT_Image", "value": nft_image_url},
-                        # 您可以添加更多信息，例如分配时间等
-                        {"name": "NFT_Assignment_Date", "value": datetime.utcnow().isoformat()}
-                    ]
-                }
-            }
-
-            try:
-                shopify_response = requests.put(order_update_url, headers=headers, data=json.dumps(payload))
-                shopify_response.raise_for_status() # 如果状态码不是2xx，则抛出HTTPError
-                logging.info(f"Successfully updated Shopify Order {order_id} with NFT details.")
-                # 记录分配历史
-                record_assignment(nft_id, nft_image_url, nft_name, str(order_id), customer_email)
-                return jsonify({"message": "NFT assigned and order updated successfully!"}), 200
-
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Failed to update Shopify Order {order_id}. Error: {e}")
-                logging.error(f"Shopify API Response: {shopify_response.text if shopify_response else 'N/A'}")
-                return jsonify({"message": "Failed to update Shopify order"}), 500 # 500 表示服务器内部错误
-
-        else:
-            logging.error("No unassigned NFTs available for distribution.")
-            # 可以在这里触发警报，例如发送邮件给管理员
-            return jsonify({"message": "No NFTs available"}), 503 # 503 Service Unavailable
+        # 尝试使用 request.get_json() 解析 JSON
+        # 如果 Content-Type 不正确，或者请求体不是有效 JSON，它会抛出错误
+        data = request.get_json()
+        logging.info(f"Parsed JSON data: {data}")
+        
+        if data is None: # 如果 get_json() 返回 None 但没有抛出错误，可能是空 JSON
+            logging.error("Error: Parsed JSON data is None. Request body might be empty JSON or not parseable.")
+            return jsonify({"status": "error", "message": "Invalid JSON: parsed data is None"}), 400
 
     except Exception as e:
-        logging.error(f"Error processing webhook: {e}", exc_info=True)
-        return jsonify({"message": "Internal Server Error"}), 500
-
-@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
-def catch_all(path):
-    """
-    捕获所有未匹配的请求，用于调试。
-    """
-    logging.debug(f"Catch-all route triggered for path: /{path}")
-    logging.debug(f"Caught {request.method} request to unrecognized path: /{path}")
-    logging.debug(f"Headers: {dict(request.headers)}")
-    if request.is_json:
+        logging.error(f"Error parsing JSON with request.get_json(): {e}")
+        # 如果 Flask 的自动解析失败，尝试手动解析原始数据
         try:
-            logging.debug(f"JSON Data (捕获): {json.dumps(request.json, indent=2)}")
-        except Exception as e:
-            logging.debug(f"Could not parse JSON data: {e}")
-            logging.debug(f"Raw Data: {request.get_data(as_text=True)}")
-    else:
-        logging.debug(f"Raw Data (捕获): {request.get_data(as_text=True)}")
-    return jsonify({"message": f"Path /{path} not found or not handled by specific webhook. Check logs for details."}), 404
+            data = json.loads(raw_data)
+            logging.info(f"Manually parsed JSON data: {data}")
+        except Exception as manual_e:
+            logging.error(f"Manual JSON parsing also failed: {manual_e}")
+            # 如果手动解析也失败，返回详细错误信息
+            return jsonify({"status": "error", "message": f"Failed to decode JSON object. Original error: {e}, Manual parse error: {manual_e}"}), 400
+        # 如果手动解析成功，继续执行 webhook 逻辑，但仍然记录原始错误
+        logging.warning("Proceeding with manually parsed JSON after initial parsing failure.")
+
+    # --- 调试代码结束 ---
+
+    # 您的现有业务逻辑
+    try:
+        order_id = data.get('id')
+        customer_email = data.get('email')
+        current_total_price = float(data.get('current_total_price'))
+        currency = data.get('currency')
+        order_name = data.get('name') # 例如： "#1018NFA"
+
+        if not all([order_id, customer_email, current_total_price, currency, order_name]):
+            logging.error(f"Missing essential data in webhook: Order ID={order_id}, Email={customer_email}, Price={current_total_price}, Currency={currency}, Order Name={order_name}")
+            return jsonify({"status": "error", "message": "Missing essential order data"}), 400
+
+        logging.info(f"Webhook data received for order {order_id}: Email={customer_email}, Total Price={current_total_price} {currency}, Order Name={order_name}")
+
+        # 如果您有其他逻辑（例如调用第三方 API），请在此处添加
+        # 例如：
+        # if your_condition:
+        #     response = requests.post("your_another_api_endpoint", json=data)
+        #     if response.status_code != 200:
+        #         logging.error(f"Failed to send data to another API: {response.text}")
+        #         return jsonify({"status": "error", "message": "Failed to process external API"}), 500
+
+        # 分配 NFT
+        assigned_nft = assign_nft_to_order(order_id, customer_email)
+
+        if assigned_nft:
+            logging.info(f"Successfully processed order {order_id}. Assigned NFT: {assigned_nft}")
+            return jsonify({
+                "status": "success",
+                "message": "Webhook processed successfully",
+                "order_id": order_id,
+                "assigned_nft": assigned_nft
+            }), 200
+        else:
+            logging.error(f"Failed to assign NFT for order {order_id}. No NFTs available or database error.")
+            return jsonify({"status": "error", "message": "Failed to assign NFT"}), 500
+
+    except AttributeError as e:
+        # 当 data 不是字典（例如是 int 或 None）时会发生
+        logging.error(f"AttributeError in webhook processing: {e}. Data received was not a dictionary as expected.")
+        return jsonify({"status": "error", "message": f"Invalid data format received: {e}"}), 400
+    except KeyError as e:
+        # 当尝试访问不存在的键时会发生
+        logging.error(f"KeyError in webhook processing: Missing data key: {e}")
+        return jsonify({"status": "error", "message": f"Missing expected data key: {e}"}), 400
+    except ValueError as e:
+        # 当 float() 转换失败时会发生
+        logging.error(f"ValueError in webhook processing: Data type conversion error: {e}")
+        return jsonify({"status": "error", "message": f"Data type conversion error: {e}"}), 400
+    except Exception as e:
+        # 捕获所有其他意外错误
+        logging.error(f"Unexpected error during webhook processing: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": f"An unexpected error occurred: {e}"}), 500
 
 if __name__ == '__main__':
-    # 仅在本地开发时运行，Render 会使用 gunicorn 启动
-    app.run(debug=True, host='0.0.0.0', port=os.getenv('PORT', 5000))
+    # 在生产环境中，Gunicorn 会处理端口，所以这个 if 块通常只用于本地测试
+    # 在 Render 上，Gunicorn 会通过命令行参数设置端口
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
