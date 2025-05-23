@@ -4,30 +4,23 @@ import random
 import logging
 from flask import Flask, request, jsonify
 import json
-import requests # 用于外部 API 调用，此库是必需的
+import requests
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 初始化 Flask 应用
-app = Flask(__name__)
+app = Flask(__name__) # 修正了这里的 '__app__' 为 '__name__'
 
 # 数据库文件路径
 DATABASE = 'nft_inventory.db'
 
 # NFT 数据定义
-# 这是一个示例，您可以在这里定义您的 NFT 盲盒内容
-# 确保这里的图片 URL 是可公开访问的 CDN 链接
-# 如果您有实际的 NFT 图片，请替换这些 URL
 NFT_ITEMS_DATA = []
 NUM_MAIN_SERIES = 200 # 主系列数量
 NUM_SUB_SERIES_PER_MAIN = 30 # 每个主系列包含的子系列数量
 
 # 生成 NFT 项目数据
-# 每个 NFT 都有一个唯一的 ID 和名称
-# 并且有一个对应的图片 URL
-# 这里的图片 URL 是示例，您需要替换为您的实际图片链接
-# 确保图片数量与 NUM_MAIN_SERIES 匹配
 TEST_IMAGE_URLS = [
     "https://images.unsplash.com/photo-1549497554-e0b49f5c2f5d?w=400&h=400&fit=crop&q=80", # 抽象艺术
     "https://images.unsplash.com/photo-1579783902674-fb825d52288b?w=400&h=400&fit=crop&q=80", # 几何抽象
@@ -205,7 +198,6 @@ def orders_paid_webhook():
     try:
         # 从解析后的 JSON 数据中提取关键信息
         order_id = data.get('id')
-        # Shopify 订单的联系邮箱可能在 'contact_email' 或 'email' 字段
         customer_email = data.get('contact_email') or data.get('email')
         current_total_price = float(data.get('current_total_price', 0.0))
         currency = data.get('currency')
@@ -224,33 +216,63 @@ def orders_paid_webhook():
         if assigned_nft_info:
             logging.info(f"Successfully processed order {order_id}. Assigned NFT: {assigned_nft_info['name']} (ID: {assigned_nft_info['id']})")
 
-            # **** Shopify Admin API 调用部分 - 增强了错误日志 ****
             SHOPIFY_STORE_URL = os.environ.get("SHOPIFY_STORE_URL")
             SHOPIFY_ADMIN_API_ACCESS_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_ACCESS_TOKEN")
 
             if SHOPIFY_STORE_URL and SHOPIFY_ADMIN_API_ACCESS_TOKEN:
-                # 注意 Shopify API 版本，这里使用 2024-07，您可以根据实际情况调整
-                order_update_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
                 headers = {
                     "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_ACCESS_TOKEN,
                     "Content-Type": "application/json"
                 }
-                # 构建要更新的 note_attributes
-                # 注意：这会替换订单中现有的 note_attributes。
-                # 如果您需要追加而不是替换，逻辑会更复杂，需要先获取现有 attributes。
-                updated_note_attributes = [
-                    {"name": "Assigned_NFT_ID", "value": assigned_nft_info['id']},
-                    {"name": "Assigned_NFT_Name", "value": assigned_nft_info['name']},
-                    {"name": "Assigned_NFT_Image_URL", "value": assigned_nft_info['image_url']} # 确保这里是正确的键名
-                ]
+                
+                # --- 新增步骤：首先获取当前订单的 note_attributes ---
+                get_order_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
+                existing_note_attributes = []
+                try:
+                    get_response = requests.get(get_order_url, headers=headers)
+                    get_response.raise_for_status()
+                    existing_order_data = get_response.json()
+                    existing_note_attributes = existing_order_data.get('order', {}).get('note_attributes', [])
+                    logging.info(f"Successfully retrieved existing note_attributes for order {order_id}: {existing_note_attributes}")
+                except requests.exceptions.RequestException as get_req_e:
+                    error_response_text = "N/A"
+                    if get_response is not None:
+                        try:
+                            error_response_text = get_response.text
+                            logging.error(f"Shopify GET API Error Status Code: {get_response.status_code}")
+                            logging.error(f"Shopify GET API Error Response Body: {error_response_text}")
+                        except Exception as inner_e:
+                            logging.error(f"Could not get response text from Shopify GET API: {inner_e}")
+                    logging.error(f"Failed to retrieve existing note_attributes for Shopify order {order_id}: {get_req_e}. Proceeding with only new attributes.")
+                    # 如果获取失败，我们仍然继续，但只添加新的属性
+                    existing_note_attributes = [] 
+
+
+                # --- 构建要更新的 note_attributes (追加新属性) ---
+                updated_note_attributes = list(existing_note_attributes) # 复制现有属性
+                # 添加我们的 NFT 属性
+                updated_note_attributes.append({"name": "Assigned_NFT_ID", "value": str(assigned_nft_info['id'])})
+                updated_note_attributes.append({"name": "Assigned_NFT_Name", "value": str(assigned_nft_info['name'])})
+                updated_note_attributes.append({"name": "Assigned_NFT_Image_URL", "value": str(assigned_nft_info['image_url'])})
+                
+                # Shopify API 要求所有的 'value' 必须是字符串
+                # 检查并确保所有值都是字符串
+                for attr in updated_note_attributes:
+                    attr['value'] = str(attr['value'])
+
+
                 update_payload = {
                     "order": {
                         "id": order_id, 
                         "note_attributes": updated_note_attributes
                     }
                 }
+                
                 # 打印发送的 payload，以便调试
-                logging.info(f"Attempting to update Shopify order {order_id} with payload: {json.dumps(update_payload)}")
+                logging.info(f"Attempting to update Shopify order {order_id} with payload: {json.dumps(update_payload, ensure_ascii=False)}") # ensure_ascii=False for Chinese chars
+                
+                # --- 发送 PUT 请求更新订单 ---
+                order_update_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
                 try:
                     response = requests.put(order_update_url, headers=headers, json=update_payload)
                     response.raise_for_status() # 如果状态码不是 2xx，则抛出 HTTPError
@@ -268,7 +290,6 @@ def orders_paid_webhook():
                     logging.error(f"Failed to update Shopify order {order_id} via Admin API: {req_e}. Full response details in preceding log lines.")
             else:
                 logging.warning("Shopify Admin API credentials (SHOPIFY_STORE_URL or SHOPIFY_ADMIN_API_ACCESS_TOKEN) not set. Cannot update order note_attributes.")
-            # **** Shopify Admin API 调用部分结束 ****
 
             return jsonify({
                 "status": "success",
